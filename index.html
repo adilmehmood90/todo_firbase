@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Firebase To‑Do App + Auth</title>
+  <!-- Tailwind CDN for styling -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { background: #f3f4f6; }
+  </style>
+</head>
+<body class="min-h-screen flex items-center justify-center p-4">
+  <!-- 🔐 Auth Card (shown when logged out) -->
+  <div id="auth-card" class="w-full max-w-sm"></div>
+
+  <!-- ✅ Main To‑Do App (visible after login) -->
+  <div id="todo-app" class="w-full max-w-lg hidden">
+    <div class="flex justify-between items-center mb-4">
+      <h1 class="text-3xl font-bold">📝 My To‑Dos</h1>
+      <div>
+        <span id="user-email" class="mr-2 text-sm text-gray-700"></span>
+        <button id="signout-btn" class="text-red-600 font-semibold">Sign out</button>
+      </div>
+    </div>
+
+    <div class="flex mb-4">
+      <input id="todo-input" type="text" placeholder="What needs to be done?" class="flex-1 p-3 rounded-l-xl border border-gray-300 focus:outline-none" />
+      <button id="add-btn" class="bg-blue-600 hover:bg-blue-700 text-white px-4 rounded-r-xl">Add</button>
+    </div>
+
+    <ul id="todo-list"></ul>
+
+    <button id="delete-all" class="w-full mt-4 bg-red-600 hover:bg-red-700 text-white py-2 rounded-xl">Delete All</button>
+  </div>
+
+  <!-- Firebase SDKs (v10+) -->
+  <script type="module">
+    // 1️⃣ Import SDK functions
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.11.0/firebase-app.js";
+    import { getFirestore, collection, addDoc, onSnapshot, deleteDoc, updateDoc, doc, getDocs } from "https://www.gstatic.com/firebasejs/10.11.0/firebase-firestore.js";
+    import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.11.0/firebase-auth.js";
+
+    // 2️⃣ Your Firebase configuration (replace with *your* values)
+    const firebaseConfig = {
+      apiKey: "AIzaSyDf-T8vJhFHFKmDt2hmA1rwF8CbvUzFgPQ",
+  authDomain: "todoapp-1d4d8.firebaseapp.com",
+  databaseURL: "https://todoapp-1d4d8-default-rtdb.firebaseio.com",
+  projectId: "todoapp-1d4d8",
+  storageBucket: "todoapp-1d4d8.firebasestorage.app",
+  messagingSenderId: "1092036307196",
+  appId: "1:1092036307196:web:0a0a96e252f448b4368f79"
+    };
+
+    // 3️⃣ Initialize Firebase services
+    const app  = initializeApp(firebaseConfig);
+    const db   = getFirestore(app);
+    const auth = getAuth(app);
+
+    // ---------- UI references ----------
+    const authCard = document.getElementById('auth-card');
+    const todoApp  = document.getElementById('todo-app');
+    const userEmailSpan = document.getElementById('user-email');
+    const todoInput = document.getElementById('todo-input');
+    const addBtn      = document.getElementById('add-btn');
+    const list        = document.getElementById('todo-list');
+    const deleteAllBtn= document.getElementById('delete-all');
+    const signoutBtn  = document.getElementById('signout-btn');
+
+    // ---------- Render Auth forms ----------
+    authCard.innerHTML = `
+      <form id="login-form" class="flex flex-col gap-3 bg-white p-6 rounded-xl shadow">
+        <h2 class="text-2xl font-bold text-center">Log In</h2>
+        <input type="email" id="login-email" placeholder="Email" class="p-2 border rounded" required>
+        <input type="password" id="login-pass" placeholder="Password" class="p-2 border rounded" required>
+        <button class="bg-blue-600 text-white py-2 rounded">Log In</button>
+        <p class="text-sm text-center">New user? <a href="#" id="goto-signup" class="text-blue-600">Create account</a></p>
+      </form>
+      <form id="signup-form" class="flex flex-col gap-3 bg-white p-6 rounded-xl shadow hidden">
+        <h2 class="text-2xl font-bold text-center">Sign Up</h2>
+        <input type="email" id="signup-email" placeholder="Email" class="p-2 border rounded" required>
+        <input type="password" id="signup-pass" placeholder="Password" class="p-2 border rounded" required>
+        <button class="bg-green-600 text-white py-2 rounded">Create Account</button>
+        <p class="text-sm text-center">Have an account? <a href="#" id="goto-login" class="text-blue-600">Log in</a></p>
+      </form>
+    `;
+
+    const loginForm  = document.getElementById('login-form');
+    const signupForm = document.getElementById('signup-form');
+
+    // Toggle between forms
+    authCard.addEventListener('click', (e) => {
+      if (e.target.id === 'goto-signup') { e.preventDefault(); loginForm.classList.add('hidden'); signupForm.classList.remove('hidden'); }
+      if (e.target.id === 'goto-login')  { e.preventDefault(); signupForm.classList.add('hidden'); loginForm.classList.remove('hidden'); }
+    });
+
+    // --- Auth handlers ---
+    loginForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      try {
+        await signInWithEmailAndPassword(auth, loginForm['login-email'].value, loginForm['login-pass'].value);
+      } catch (err) { alert(err.message); }
+    });
+
+    signupForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      try {
+        await createUserWithEmailAndPassword(auth, signupForm['signup-email'].value, signupForm['signup-pass'].value);
+      } catch (err) { alert(err.message); }
+    });
+
+    signoutBtn.addEventListener('click', () => signOut(auth));
+
+    // ---------- To‑Do logic ----------
+    let todosRef = null;       // points to /users/{uid}/todos
+    let unsubscribeTodos = null;
+
+    const attachTodoListener = () => {
+      if (unsubscribeTodos) unsubscribeTodos();
+      unsubscribeTodos = onSnapshot(todosRef, (snapshot) => {
+        list.innerHTML = '';
+        snapshot.forEach((docSnap) => {
+          const li = document.createElement('li');
+          li.className = 'flex justify-between items-center bg-white shadow rounded-xl px-4 py-2 mb-2';
+          li.innerHTML = `
+            <span class="flex-1 pr-4 break-all">${docSnap.data().text}</span>
+            <div class="space-x-2 shrink-0">
+              <button class="edit-btn text-yellow-600" data-id="${docSnap.id}" title="Edit">✏️</button>
+              <button class="delete-btn text-red-600" data-id="${docSnap.id}" title="Delete">🗑️</button>
+            </div>
+          `;
+          list.appendChild(li);
+        });
+      });
+    };
+
+    onAuthStateChanged(auth, (user) => {
+      if (user) {
+        // Logged in 👉 show app
+        authCard.classList.add('hidden');
+        todoApp.classList.remove('hidden');
+        userEmailSpan.textContent = user.email;
+
+        // Point to the current user's collection
+        todosRef = collection(db, 'users', user.uid, 'todos');
+        attachTodoListener();
+      } else {
+        // Logged out 👉 show auth forms
+        if (unsubscribeTodos) unsubscribeTodos();
+        todoApp.classList.add('hidden');
+        authCard.classList.remove('hidden');
+        signupForm.classList.add('hidden'); // default to login view
+        loginForm.classList.remove('hidden');
+      }
+    });
+
+    // Add new to‑do
+    addBtn.addEventListener('click', async () => {
+      if (!auth.currentUser) return;
+      const text = todoInput.value.trim();
+      if (!text) return;
+      await addDoc(todosRef, { text, created: Date.now() });
+      todoInput.value = '';
+    });
+
+    // Edit & delete (event delegation)
+    list.addEventListener('click', async (e) => {
+      const id = e.target.dataset.id;
+      if (!id || !auth.currentUser) return;
+
+      if (e.target.classList.contains('delete-btn')) {
+        await deleteDoc(doc(db, 'users', auth.currentUser.uid, 'todos', id));
+      }
+
+      if (e.target.classList.contains('edit-btn')) {
+        const currentText = e.target.closest('li').querySelector('span').textContent;
+        const newText = prompt('Edit todo', currentText);
+        if (newText && newText.trim() && newText !== currentText) {
+          await updateDoc(doc(db, 'users', auth.currentUser.uid, 'todos', id), { text: newText.trim() });
+        }
+      }
+    });
+
+    // Delete all to‑dos
+    deleteAllBtn.addEventListener('click', async () => {
+      if (!auth.currentUser) return;
+      if (!confirm('Delete ALL to‑dos?')) return;
+      const snapshot = await getDocs(todosRef);
+      const promises = [];
+      snapshot.forEach((d) => promises.push(deleteDoc(d.ref)));
+      await Promise.all(promises);
+    });
+  </script>
+</body>
+</html>
